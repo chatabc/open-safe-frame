@@ -228,6 +228,7 @@ export class DecisionEngine {
       lines.push('⚠️ 此操作风险较高，需要输入密码确认');
     } else {
       lines.push('请确认是否继续执行此操作');
+    }
 
     return lines.join('\n');
   }
