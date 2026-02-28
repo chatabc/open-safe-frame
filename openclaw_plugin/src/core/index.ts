@@ -6,3 +6,4 @@ export * from './consequence_engine';
 export * from './value_engine';
 export * from './decision_engine';
 export * from './coordinator';
+export * from './constraint_manager';

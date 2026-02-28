@@ -15,11 +15,12 @@ import type {
 } from './types';
 import { SafetyCoordinator, SafetyAssessment, SessionEvent, ToolContext, PluginConfig } from './core';
 import { AIAnalyzer } from './core/ai_analyzer';
+import { ConstraintManager, ConstraintExtractionResult, CONSTRAINT_EXTRACTION_PROMPT } from './core/constraint_manager';
 import type { AISafetyPluginConfig, AIProviderConfig } from './core/ai_types';
 
 const PLUGIN_ID = 'open-safe-frame';
 const PLUGIN_NAME = 'Open Safe Frame';
-const PLUGIN_VERSION = '2.2.0';
+const PLUGIN_VERSION = '2.4.0';
 const LOG_PREFIX = `[${PLUGIN_ID}]`;
 
 function createLogger(baseLogger: PluginLogger): PluginLogger {
@@ -35,6 +36,7 @@ interface SessionState {
   userMessage: string;
   sessionHistory: SessionEvent[];
   pendingConfirmation: SafetyAssessment | null;
+  constraintManager: ConstraintManager;
 }
 
 const sessionStates = new Map<string, SessionState>();
@@ -49,6 +51,7 @@ function getSessionState(sessionKey: string): SessionState {
       userMessage: '',
       sessionHistory: [],
       pendingConfirmation: null,
+      constraintManager: new ConstraintManager(sessionKey),
     });
   }
   return sessionStates.get(sessionKey)!;
@@ -101,6 +104,33 @@ function extractAIConfigFromOpenClaw(api: OpenClawPluginApi): { provider: AIProv
   };
 }
 
+async function extractConstraints(
+  userMessage: string,
+  sessionHistory: SessionEvent[],
+  analyzer: AIAnalyzer
+): Promise<ConstraintExtractionResult> {
+  try {
+    const historyText = sessionHistory
+      .slice(-5)
+      .map(e => `${e.type}: ${e.content}`)
+      .join('\n');
+
+    const prompt = CONSTRAINT_EXTRACTION_PROMPT
+      .replace('{{USER_MESSAGE}}', userMessage)
+      .replace('{{SESSION_HISTORY}}', historyText || '无');
+
+    const response = await analyzer['callAI'](prompt);
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return { constraints: [], confidence: 0 };
+    }
+    return JSON.parse(jsonMatch[0]);
+  } catch (error) {
+    log.warn(`约束提取失败: ${error}`);
+    return { constraints: [], confidence: 0 };
+  }
+}
+
 export const openSafeFramePlugin = {
   id: PLUGIN_ID,
   name: PLUGIN_NAME,
@@ -139,6 +169,7 @@ export const openSafeFramePlugin = {
     }
     
     log.info('新范式: 意图理解 → 后果预测 → 价值判断 → 协同决策');
+    log.info('约束持久化: 用户约束将被提取并持续跟踪');
 
     api.on('before_agent_start', async (
       event: PluginHookBeforeAgentStartEvent,
@@ -157,7 +188,18 @@ export const openSafeFramePlugin = {
           content: text,
           timestamp: new Date(),
         });
+
+        if (aiAnalyzer && text.trim()) {
+          const extraction = await extractConstraints(text, state.sessionHistory, aiAnalyzer);
+          if (extraction.constraints.length > 0) {
+            const added = state.constraintManager.addConstraintsFromExtraction(extraction, text);
+            log.info(`提取到 ${added.length} 个约束 (置信度: ${(extraction.confidence * 100).toFixed(0)}%)`);
+            added.forEach(c => log.debug?.(`  - [${c.priority}] ${c.content}`));
+          }
+        }
       }
+
+      const constraintPrompt = state.constraintManager.formatConstraintsForPrompt();
 
       return {
         prependContext: [
@@ -166,11 +208,14 @@ export const openSafeFramePlugin = {
           '',
           '核心理念: 权限开放，约束内置',
           '',
+          constraintPrompt,
+          '',
           '工作原理:',
           '1. AI拥有完全的操作权限',
-          '2. 每个操作都会进行意图理解、后果预测、价值判断',
-          '3. 高风险操作需要用户确认（会详细说明意图、操作、后果、严重程度）',
-          '4. 如非必要，不打扰用户',
+          '2. 用户约束会被持久化跟踪',
+          '3. 每个操作都会检查是否违反约束',
+          '4. 高风险操作需要用户确认',
+          '5. 如非必要，不打扰用户',
           '',
           '如果收到确认请求，请仔细阅读后决定是否继续。',
           '</open-safe-frame>',
@@ -198,6 +243,15 @@ export const openSafeFramePlugin = {
         timestamp: new Date(),
       });
 
+      if (aiAnalyzer && text.trim() && !text.match(/^(确认|取消|confirm|cancel|yes|no)$/i)) {
+        const extraction = await extractConstraints(text, state.sessionHistory, aiAnalyzer);
+        if (extraction.constraints.length > 0) {
+          const added = state.constraintManager.addConstraintsFromExtraction(extraction, text);
+          log.info(`提取到 ${added.length} 个新约束`);
+          added.forEach(c => log.debug?.(`  - [${c.priority}] ${c.content}`));
+        }
+      }
+
       if (state.pendingConfirmation) {
         const lowerText = text.toLowerCase().trim();
         if (lowerText === '确认' || lowerText === 'confirm' || lowerText === 'yes') {
@@ -219,6 +273,42 @@ export const openSafeFramePlugin = {
       
       log.debug?.(`评估工具调用: ${event.toolName}`);
 
+      const violationCheck = state.constraintManager.checkViolation({
+        type: event.toolName,
+        description: `${event.toolName}(${JSON.stringify(event.params).slice(0, 100)})`,
+        params: event.params,
+      });
+
+      if (violationCheck.violated) {
+        const violatedList = violationCheck.violatedConstraints
+          .map(c => `• ${c.content}`)
+          .join('\n');
+        
+        log.warn(`操作违反约束: ${event.toolName}`);
+        
+        return {
+          block: true,
+          blockReason: [
+            '═'.repeat(50),
+            '⚠️ Open Safe Frame - 约束冲突',
+            '═'.repeat(50),
+            '',
+            '【即将执行的操作】',
+            `  工具: ${event.toolName}`,
+            `  参数: ${JSON.stringify(event.params, null, 2).slice(0, 200)}`,
+            '',
+            '【违反的约束】',
+            violatedList,
+            '',
+            '【处理方式】',
+            '此操作与您之前设置的约束冲突。',
+            '如需执行，请先明确表示"允许执行此操作"，或修改约束。',
+            '',
+            '═'.repeat(50),
+          ].join('\n'),
+        };
+      }
+
       const toolContext: ToolContext = {
         toolName: event.toolName,
         params: event.params,
@@ -231,8 +321,7 @@ export const openSafeFramePlugin = {
         log.info(`安全评估完成: ${assessment.decision.action} (${assessment.processingTime}ms)`);
         log.debug?.(`意图: ${assessment.intent.understood}`);
         log.debug?.(`置信度: ${(assessment.intent.confidence * 100).toFixed(0)}%`);
-        log.debug?.(`风险评分: ${assessment.valueAlignment.riskScore.toFixed(2)}`);
-        log.debug?.(`用户利益评分: ${assessment.valueAlignment.userInterestScore.toFixed(2)}`);
+        log.debug?.(`活跃约束: ${state.constraintManager.getActiveConstraintCount()}`);
 
         switch (assessment.decision.action) {
           case 'reject':
@@ -248,6 +337,7 @@ export const openSafeFramePlugin = {
 
           case 'proceed':
             log.info(`操作已批准: ${event.toolName}`);
+            state.constraintManager.deactivateOperationConstraints();
             return {};
         }
       } catch (error) {
@@ -288,6 +378,10 @@ export const openSafeFramePlugin = {
       ctx: PluginHookSessionContext
     ) => {
       const sessionKey = ctx.sessionId || 'default';
+      const state = sessionStates.get(sessionKey);
+      if (state) {
+        log.info(`会话结束，共跟踪 ${state.constraintManager.getConstraintCount()} 个约束`);
+      }
       sessionStates.delete(sessionKey);
       log.debug?.(`会话结束: ${sessionKey}`);
     });
@@ -297,4 +391,4 @@ export const openSafeFramePlugin = {
 };
 
 export default openSafeFramePlugin;
-export { SafetyCoordinator, SafetyAssessment } from './core';
+export { SafetyCoordinator, SafetyAssessment, ConstraintManager } from './core';
