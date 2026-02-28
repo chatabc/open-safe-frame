@@ -3,7 +3,9 @@ import type {
   IntentAnalysisResult, 
   ConsequenceAnalysisResult, 
   SafetyDecision,
-  AIProviderConfig 
+  AIProviderConfig,
+  OpenClawModelInfo,
+  AISafetyPluginConfig
 } from './ai_types';
 
 const INTENT_ANALYSIS_PROMPT = `你是一个AI安全分析专家。请分析以下用户请求和即将执行的操作。
@@ -111,19 +113,108 @@ const SAFETY_DECISION_PROMPT = `你是一个AI安全决策专家。请根据以�
 
 只返回JSON，不要其他内容。`;
 
+type OpenClawConfig = {
+  agents?: {
+    defaults?: {
+      model?: string | { primary?: string; fallbacks?: string[] };
+    };
+    list?: Array<{
+      id: string;
+      default?: boolean;
+      model?: string | { primary?: string; fallbacks?: string[] };
+    }>;
+  };
+  models?: {
+    providers?: Record<string, {
+      baseUrl?: string;
+      apiKey?: string;
+      models?: Array<{ id: string; name: string }>;
+    }>;
+  };
+};
+
 export class AIAnalyzer {
   private config: AIProviderConfig;
+  private pluginConfig: AISafetyPluginConfig;
   private cache: Map<string, { result: unknown; timestamp: number }> = new Map();
   private readonly CACHE_TTL = 60000;
+  private openClawConfig: OpenClawConfig | null = null;
 
-  constructor(config: AIProviderConfig) {
+  constructor(config: AIProviderConfig, pluginConfig?: AISafetyPluginConfig) {
     this.config = config;
+    this.pluginConfig = pluginConfig || { enabled: true, mode: 'openclaw', riskThreshold: 'medium', enableCache: true, logAnalysis: false };
+  }
+
+  setOpenClawConfig(config: OpenClawConfig): void {
+    this.openClawConfig = config;
+    if (this.pluginConfig.mode === 'openclaw') {
+      const modelInfo = this.extractOpenClawModelInfo(config);
+      if (modelInfo) {
+        this.config = this.convertToProviderConfig(modelInfo);
+      }
+    }
+  }
+
+  private extractOpenClawModelInfo(config: OpenClawConfig): OpenClawModelInfo | null {
+    const defaultAgent = config.agents?.list?.find(a => a.default) || config.agents?.list?.[0];
+    
+    let modelStr: string | undefined;
+    if (defaultAgent?.model) {
+      modelStr = typeof defaultAgent.model === 'string' 
+        ? defaultAgent.model 
+        : defaultAgent.model.primary;
+    }
+    
+    if (!modelStr && config.agents?.defaults?.model) {
+      modelStr = typeof config.agents.defaults.model === 'string'
+        ? config.agents.defaults.model
+        : config.agents.defaults.model.primary;
+    }
+
+    if (!modelStr) {
+      return null;
+    }
+
+    const [provider, model] = modelStr.includes('/') 
+      ? modelStr.split('/') 
+      : ['openai', modelStr];
+
+    const providerConfig = config.models?.providers?.[provider];
+    
+    return {
+      provider: this.normalizeProvider(provider),
+      model: model || 'gpt-4o-mini',
+      baseUrl: providerConfig?.baseUrl,
+      apiKey: providerConfig?.apiKey,
+    };
+  }
+
+  private normalizeProvider(provider: string): AIProviderConfig['provider'] {
+    const providerMap: Record<string, AIProviderConfig['provider']> = {
+      'openai': 'openai',
+      'anthropic': 'anthropic',
+      'claude': 'anthropic',
+      'ollama': 'ollama',
+      'local': 'ollama',
+    };
+    return providerMap[provider.toLowerCase()] || 'openai';
+  }
+
+  private convertToProviderConfig(info: OpenClawModelInfo): AIProviderConfig {
+    return {
+      provider: info.provider,
+      model: info.model,
+      baseUrl: info.baseUrl,
+      apiKey: info.apiKey,
+    };
   }
 
   async analyzeIntent(request: AIAnalysisRequest): Promise<IntentAnalysisResult> {
-    const cacheKey = `intent:${JSON.stringify(request)}`;
-    const cached = this.getFromCache<IntentAnalysisResult>(cacheKey);
-    if (cached) return cached;
+    if (this.pluginConfig.enableCache) {
+      const cacheKey = `intent:${JSON.stringify(request)}`;
+      const cached = this.getFromCache<IntentAnalysisResult>(cacheKey);
+      if (cached) return cached;
+    }
 
     const prompt = this.buildPrompt(INTENT_ANALYSIS_PROMPT, {
       USER_MESSAGE: request.userMessage,
@@ -135,7 +226,14 @@ export class AIAnalyzer {
     const response = await this.callAI(prompt);
     const result = this.parseJSON<IntentAnalysisResult>(response);
     
-    this.setCache(cacheKey, result);
+    if (this.pluginConfig.logAnalysis) {
+      console.log('[AI Safety] Intent analysis:', JSON.stringify(result, null, 2));
+    }
+    
+    if (this.pluginConfig.enableCache) {
+      const cacheKey = `intent:${JSON.stringify(request)}`;
+      this.setCache(cacheKey, result);
+    }
     return result;
   }
 
@@ -143,9 +241,11 @@ export class AIAnalyzer {
     request: AIAnalysisRequest,
     intent: IntentAnalysisResult
   ): Promise<ConsequenceAnalysisResult> {
-    const cacheKey = `consequence:${JSON.stringify({ request, intent })}`;
-    const cached = this.getFromCache<ConsequenceAnalysisResult>(cacheKey);
-    if (cached) return cached;
+    if (this.pluginConfig.enableCache) {
+      const cacheKey = `consequence:${JSON.stringify({ request, intent })}`;
+      const cached = this.getFromCache<ConsequenceAnalysisResult>(cacheKey);
+      if (cached) return cached;
+    }
 
     const prompt = this.buildPrompt(CONSEQUENCE_ANALYSIS_PROMPT, {
       USER_INTENT: intent.understood,
@@ -157,7 +257,14 @@ export class AIAnalyzer {
     const response = await this.callAI(prompt);
     const result = this.parseJSON<ConsequenceAnalysisResult>(response);
     
-    this.setCache(cacheKey, result);
+    if (this.pluginConfig.logAnalysis) {
+      console.log('[AI Safety] Consequence analysis:', JSON.stringify(result, null, 2));
+    }
+    
+    if (this.pluginConfig.enableCache) {
+      const cacheKey = `consequence:${JSON.stringify({ request, intent })}`;
+      this.setCache(cacheKey, result);
+    }
     return result;
   }
 
@@ -172,7 +279,13 @@ export class AIAnalyzer {
     });
 
     const response = await this.callAI(prompt);
-    return this.parseJSON<SafetyDecision>(response);
+    const decision = this.parseJSON<SafetyDecision>(response);
+    
+    if (this.pluginConfig.logAnalysis) {
+      console.log('[AI Safety] Decision:', JSON.stringify(decision, null, 2));
+    }
+    
+    return decision;
   }
 
   private buildPrompt(template: string, variables: Record<string, string>): string {
@@ -201,8 +314,6 @@ export class AIAnalyzer {
         return this.callAnthropic(prompt);
       case 'ollama':
         return this.callOllama(prompt);
-      case 'openclaw':
-        return this.callOpenClaw(prompt);
       default:
         throw new Error(`Unknown AI provider: ${this.config.provider}`);
     }
@@ -212,12 +323,17 @@ export class AIAnalyzer {
     const baseUrl = this.config.baseUrl || 'https://api.openai.com/v1';
     const model = this.config.model || 'gpt-4o-mini';
     
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    
+    if (this.config.apiKey) {
+      headers['Authorization'] = `Bearer ${this.config.apiKey}`;
+    }
+
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.config.apiKey}`,
-      },
+      headers,
       body: JSON.stringify({
         model,
         messages: [{ role: 'user', content: prompt }],
@@ -227,10 +343,11 @@ export class AIAnalyzer {
     });
 
     if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.status}`);
+      const errorText = await response.text();
+      throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as { choices: Array<{ message: { content: string } }> };
     return data.choices[0].message.content;
   }
 
@@ -238,13 +355,18 @@ export class AIAnalyzer {
     const baseUrl = this.config.baseUrl || 'https://api.anthropic.com';
     const model = this.config.model || 'claude-3-haiku-20240307';
     
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+    };
+    
+    if (this.config.apiKey) {
+      headers['x-api-key'] = this.config.apiKey;
+    }
+
     const response = await fetch(`${baseUrl}/v1/messages`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.config.apiKey || '',
-        'anthropic-version': '2023-06-01',
-      },
+      headers,
       body: JSON.stringify({
         model,
         max_tokens: 1000,
@@ -253,10 +375,11 @@ export class AIAnalyzer {
     });
 
     if (!response.ok) {
-      throw new Error(`Anthropic API error: ${response.status}`);
+      const errorText = await response.text();
+      throw new Error(`Anthropic API error: ${response.status} - ${errorText}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as { content: Array<{ text: string }> };
     return data.content[0].text;
   }
 
@@ -280,33 +403,12 @@ export class AIAnalyzer {
     });
 
     if (!response.ok) {
-      throw new Error(`Ollama API error: ${response.status}`);
+      const errorText = await response.text();
+      throw new Error(`Ollama API error: ${response.status} - ${errorText}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as { response: string };
     return data.response;
-  }
-
-  private async callOpenClaw(prompt: string): Promise<string> {
-    const baseUrl = this.config.baseUrl || 'http://localhost:3000';
-    
-    const response = await fetch(`${baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message: prompt,
-        stream: false,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenClaw API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    return data.response || data.message || data.content;
   }
 
   private parseJSON<T>(text: string): T {
@@ -327,5 +429,21 @@ export class AIAnalyzer {
 
   private setCache(key: string, result: unknown): void {
     this.cache.set(key, { result, timestamp: Date.now() });
+  }
+
+  isConfigured(): boolean {
+    if (this.pluginConfig.mode === 'openclaw') {
+      return this.openClawConfig !== null;
+    }
+    return !!(this.config.apiKey || this.config.provider === 'ollama');
+  }
+
+  getConfigInfo(): { mode: string; provider: string; model: string; configured: boolean } {
+    return {
+      mode: this.pluginConfig.mode || 'openclaw',
+      provider: this.config.provider,
+      model: this.config.model || 'default',
+      configured: this.isConfigured(),
+    };
   }
 }

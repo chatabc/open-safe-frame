@@ -14,10 +14,12 @@ import type {
   PluginHookSessionContext,
 } from './types';
 import { SafetyCoordinator, SafetyAssessment, SessionEvent, ToolContext, PluginConfig } from './core';
+import { AIAnalyzer } from './core/ai_analyzer';
+import type { AISafetyPluginConfig, AIProviderConfig } from './core/ai_types';
 
 const PLUGIN_ID = 'open-safe-frame';
 const PLUGIN_NAME = 'Open Safe Frame';
-const PLUGIN_VERSION = '2.1.0';
+const PLUGIN_VERSION = '2.2.0';
 const LOG_PREFIX = `[${PLUGIN_ID}]`;
 
 function createLogger(baseLogger: PluginLogger): PluginLogger {
@@ -39,6 +41,7 @@ const sessionStates = new Map<string, SessionState>();
 let coordinator: SafetyCoordinator;
 let pluginConfig: PluginConfig;
 let log: PluginLogger;
+let aiAnalyzer: AIAnalyzer | null = null;
 
 function getSessionState(sessionKey: string): SessionState {
   if (!sessionStates.has(sessionKey)) {
@@ -49,6 +52,53 @@ function getSessionState(sessionKey: string): SessionState {
     });
   }
   return sessionStates.get(sessionKey)!;
+}
+
+function extractAIConfigFromOpenClaw(api: OpenClawPluginApi): { provider: AIProviderConfig; mode: 'openclaw' } | null {
+  const config = api.config;
+  
+  const defaultAgent = config.agents?.list?.find(a => a.default) || config.agents?.list?.[0];
+  
+  let modelStr: string | undefined;
+  if (defaultAgent?.model) {
+    modelStr = typeof defaultAgent.model === 'string' 
+      ? defaultAgent.model 
+      : defaultAgent.model.primary;
+  }
+  
+  if (!modelStr && config.agents?.defaults?.model) {
+    modelStr = typeof config.agents.defaults.model === 'string'
+      ? config.agents.defaults.model
+      : config.agents.defaults.model.primary;
+  }
+
+  if (!modelStr) {
+    return null;
+  }
+
+  const [provider, model] = modelStr.includes('/') 
+    ? modelStr.split('/') 
+    : ['openai', modelStr];
+
+  const providerConfig = config.models?.providers?.[provider];
+  
+  const providerMap: Record<string, AIProviderConfig['provider']> = {
+    'openai': 'openai',
+    'anthropic': 'anthropic',
+    'claude': 'anthropic',
+    'ollama': 'ollama',
+    'local': 'ollama',
+  };
+
+  return {
+    provider: {
+      provider: providerMap[provider.toLowerCase()] || 'openai',
+      model: model || 'gpt-4o-mini',
+      baseUrl: providerConfig?.baseUrl,
+      apiKey: providerConfig?.apiKey,
+    },
+    mode: 'openclaw',
+  };
 }
 
 export const openSafeFramePlugin = {
@@ -68,11 +118,24 @@ export const openSafeFramePlugin = {
     }
 
     log.info(`Open Safe Frame v${PLUGIN_VERSION} loaded`);
-    
-    if (pluginConfig.aiProvider) {
-      log.info(`AI分析模式: ${pluginConfig.aiProvider.provider}${pluginConfig.aiProvider.model ? ` / ${pluginConfig.aiProvider.model}` : ''}`);
+
+    const aiSafetyConfig = pluginConfig as AISafetyPluginConfig;
+    const mode = aiSafetyConfig.mode || 'openclaw';
+
+    if (mode === 'openclaw') {
+      const openClawAI = extractAIConfigFromOpenClaw(api);
+      if (openClawAI) {
+        aiAnalyzer = new AIAnalyzer(openClawAI.provider, aiSafetyConfig);
+        aiAnalyzer.setOpenClawConfig(api.config);
+        log.info(`AI分析模式: OpenClaw配置 (${openClawAI.provider.provider}/${openClawAI.provider.model})`);
+      } else {
+        log.warn('OpenClaw模式但未找到模型配置，将使用规则分析模式');
+      }
+    } else if (mode === 'custom' && aiSafetyConfig.customProvider) {
+      aiAnalyzer = new AIAnalyzer(aiSafetyConfig.customProvider, aiSafetyConfig);
+      log.info(`AI分析模式: 自定义配置 (${aiSafetyConfig.customProvider.provider}/${aiSafetyConfig.customProvider.model || 'default'})`);
     } else {
-      log.info('规则分析模式 (未配置AI Provider)');
+      log.info('规则分析模式 (未配置AI)');
     }
     
     log.info('新范式: 意图理解 → 后果预测 → 价值判断 → 协同决策');

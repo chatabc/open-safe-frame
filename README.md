@@ -82,21 +82,69 @@ npm install @open-safe-frame/openclaw-plugin
 
 ## 配置
 
-在 `openclaw.json` 中添加：
+### 模式A：使用OpenClaw配置（推荐，省事）
+
+直接使用OpenClaw已配置的AI模型，无需额外配置：
 
 ```json
 {
   "plugins": {
     "entries": {
       "open-safe-frame": {
+        "enabled": true,
         "config": {
-          "enabled": true
+          "mode": "openclaw"
         }
       }
     }
   }
 }
 ```
+
+插件会自动读取OpenClaw的模型配置（`agents.defaults.model` 或 `agents.list[].model`）。
+
+### 模式B：自定义AI配置（有想法的用户）
+
+单独配置安全分析用的AI：
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "open-safe-frame": {
+        "enabled": true,
+        "config": {
+          "mode": "custom",
+          "customProvider": {
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "apiKey": "your-api-key",
+            "baseUrl": "https://api.openai.com/v1"
+          },
+          "riskThreshold": "medium",
+          "enableCache": true,
+          "logAnalysis": false
+        }
+      }
+    }
+  }
+}
+```
+
+支持的provider：
+- `openai` - OpenAI API
+- `anthropic` - Claude API
+- `ollama` - 本地Ollama
+
+### 配置项说明
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `mode` | AI配置模式：`openclaw`（使用OpenClaw配置）或 `custom`（自定义） | `openclaw` |
+| `customProvider` | 自定义AI配置（mode=custom时使用） | - |
+| `riskThreshold` | 风险阈值：`low`/`medium`/`high`/`critical` | `medium` |
+| `enableCache` | 是否启用分析结果缓存 | `true` |
+| `logAnalysis` | 是否记录详细分析日志 | `false` |
 
 ## 确认请求示例
 
@@ -145,6 +193,8 @@ openclaw_plugin/
 │   ├── types.ts              # 类型定义
 │   └── core/
 │       ├── types.ts          # 核心类型
+│       ├── ai_types.ts       # AI分析类型
+│       ├── ai_analyzer.ts    # AI分析器
 │       ├── intent_engine.ts  # 意图理解引擎
 │       ├── consequence_engine.ts  # 后果预测引擎
 │       ├── value_engine.ts   # 价值判断引擎

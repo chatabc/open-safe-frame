@@ -47,3 +47,30 @@ export interface AIProviderConfig {
   apiKey?: string;
   baseUrl?: string;
 }
+
+export type AIConfigMode = 'openclaw' | 'custom';
+
+export interface OpenClawModelInfo {
+  provider: string;
+  model: string;
+  baseUrl?: string;
+  apiKey?: string;
+}
+
+export interface AISafetyPluginConfig {
+  enabled?: boolean;
+  mode?: AIConfigMode;
+  customProvider?: AIProviderConfig;
+  riskThreshold?: 'low' | 'medium' | 'high' | 'critical';
+  enableCache?: boolean;
+  logAnalysis?: boolean;
+}
+
+export const DEFAULT_AI_SAFETY_CONFIG: Required<AISafetyPluginConfig> = {
+  enabled: true,
+  mode: 'openclaw',
+  customProvider: undefined as unknown as AIProviderConfig,
+  riskThreshold: 'medium',
+  enableCache: true,
+  logAnalysis: false,
+};

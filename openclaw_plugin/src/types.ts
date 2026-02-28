@@ -287,13 +287,46 @@ export type PluginHookHandlerMap = {
   ) => Promise<void> | void;
 };
 
+export type OpenClawAgentModelConfig = string | {
+  primary?: string;
+  fallbacks?: string[];
+};
+
+export type OpenClawAgentConfig = {
+  id: string;
+  default?: boolean;
+  model?: OpenClawAgentModelConfig;
+};
+
+export type OpenClawAgentsConfig = {
+  defaults?: {
+    model?: OpenClawAgentModelConfig;
+  };
+  list?: OpenClawAgentConfig[];
+};
+
+export type OpenClawModelProviderConfig = {
+  baseUrl?: string;
+  apiKey?: string;
+  models?: Array<{ id: string; name: string }>;
+};
+
+export type OpenClawModelsConfig = {
+  providers?: Record<string, OpenClawModelProviderConfig>;
+};
+
+export type OpenClawConfig = {
+  agents?: OpenClawAgentsConfig;
+  models?: OpenClawModelsConfig;
+};
+
 export type OpenClawPluginApi = {
   id: string;
   name: string;
   version?: string;
   description?: string;
   source: string;
-  config: Record<string, unknown>;
+  config: OpenClawConfig;
   pluginConfig?: Record<string, unknown>;
   logger: PluginLogger;
   on: <K extends keyof PluginHookHandlerMap>(
