@@ -15,12 +15,19 @@ import type {
 } from './types';
 import { SafetyCoordinator, SafetyAssessment, SessionEvent, ToolContext, PluginConfig } from './core';
 import { AIAnalyzer } from './core/ai_analyzer';
-import { ConstraintManager, ConstraintExtractionResult, CONSTRAINT_EXTRACTION_PROMPT } from './core/constraint_manager';
+import { 
+  ConstraintManager, 
+  ConstraintExtractionResult, 
+  CONSTRAINT_EXTRACTION_PROMPT,
+  AppealRequest,
+  Constraint,
+} from './core/constraint_manager';
 import type { AISafetyPluginConfig, AIProviderConfig } from './core/ai_types';
+import { createHash } from 'crypto';
 
 const PLUGIN_ID = 'open-safe-frame';
 const PLUGIN_NAME = 'Open Safe Frame';
-const PLUGIN_VERSION = '2.4.0';
+const PLUGIN_VERSION = '2.5.0';
 const LOG_PREFIX = `[${PLUGIN_ID}]`;
 
 function createLogger(baseLogger: PluginLogger): PluginLogger {
@@ -36,25 +43,42 @@ interface SessionState {
   userMessage: string;
   sessionHistory: SessionEvent[];
   pendingConfirmation: SafetyAssessment | null;
+  pendingAppeal: {
+    appeal: AppealRequest;
+    constraint: Constraint;
+    toolEvent: PluginHookBeforeToolCallEvent;
+  } | null;
   constraintManager: ConstraintManager;
+  password: string | null;
 }
 
 const sessionStates = new Map<string, SessionState>();
 let coordinator: SafetyCoordinator;
-let pluginConfig: PluginConfig;
+let pluginConfig: PluginConfig & { confirmationPassword?: string };
 let log: PluginLogger;
 let aiAnalyzer: AIAnalyzer | null = null;
 
 function getSessionState(sessionKey: string): SessionState {
   if (!sessionStates.has(sessionKey)) {
-    sessionStates.set(sessionKey, {
+    const state: SessionState = {
       userMessage: '',
       sessionHistory: [],
       pendingConfirmation: null,
+      pendingAppeal: null,
       constraintManager: new ConstraintManager(sessionKey),
-    });
+      password: null,
+    };
+    if (pluginConfig.confirmationPassword) {
+      state.password = pluginConfig.confirmationPassword;
+      state.constraintManager.setPasswordHash(hashPassword(pluginConfig.confirmationPassword));
+    }
+    sessionStates.set(sessionKey, state);
   }
   return sessionStates.get(sessionKey)!;
+}
+
+function hashPassword(password: string): string {
+  return createHash('sha256').update(password).digest('hex');
 }
 
 function extractAIConfigFromOpenClaw(api: OpenClawPluginApi): { provider: AIProviderConfig; mode: 'openclaw' } | null {
@@ -119,7 +143,7 @@ async function extractConstraints(
       .replace('{{USER_MESSAGE}}', userMessage)
       .replace('{{SESSION_HISTORY}}', historyText || '无');
 
-    const response = await analyzer['callAI'](prompt);
+    const response = await (analyzer as any).callAI(prompt);
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       return { constraints: [], confidence: 0 };
@@ -139,7 +163,7 @@ export const openSafeFramePlugin = {
 
   register(api: OpenClawPluginApi) {
     log = createLogger(api.logger);
-    pluginConfig = (api.pluginConfig as PluginConfig) || {};
+    pluginConfig = (api.pluginConfig as PluginConfig & { confirmationPassword?: string }) || {};
     coordinator = new SafetyCoordinator(pluginConfig);
 
     if (pluginConfig.enabled === false) {
@@ -170,6 +194,7 @@ export const openSafeFramePlugin = {
     
     log.info('新范式: 意图理解 → 后果预测 → 价值判断 → 协同决策');
     log.info('约束持久化: 用户约束将被提取并持续跟踪');
+    log.info('申诉机制: AI可申诉违反约束的操作，用户最终决定');
 
     api.on('before_agent_start', async (
       event: PluginHookBeforeAgentStartEvent,
@@ -210,14 +235,11 @@ export const openSafeFramePlugin = {
           '',
           constraintPrompt,
           '',
-          '工作原理:',
-          '1. AI拥有完全的操作权限',
-          '2. 用户约束会被持久化跟踪',
-          '3. 每个操作都会检查是否违反约束',
-          '4. 高风险操作需要用户确认',
-          '5. 如非必要，不打扰用户',
+          '## 申诉机制',
+          '如果您的操作被约束阻止，可以申诉说明理由。',
+          '达到申诉门槛后，插件将向用户请求许可。',
+          '格式: 申诉: <您的理由>',
           '',
-          '如果收到确认请求，请仔细阅读后决定是否继续。',
           '</open-safe-frame>',
         ].join('\n'),
       };
@@ -243,7 +265,66 @@ export const openSafeFramePlugin = {
         timestamp: new Date(),
       });
 
-      if (aiAnalyzer && text.trim() && !text.match(/^(确认|取消|confirm|cancel|yes|no)$/i)) {
+      if (state.pendingAppeal) {
+        const lowerText = text.toLowerCase().trim();
+        
+        if (lowerText === '拒绝' || lowerText === 'reject' || lowerText === 'no') {
+          log.info('用户拒绝了申诉');
+          state.constraintManager.recordAppeal(state.pendingAppeal.constraint.id, {
+            reason: state.pendingAppeal.appeal.reason,
+            toolName: state.pendingAppeal.appeal.toolName,
+            params: state.pendingAppeal.appeal.toolParams,
+            userDecision: 'rejected',
+          });
+          state.pendingAppeal = null;
+          return;
+        }
+
+        if (lowerText.startsWith('删除约束:')) {
+          const password = text.split(':')[1]?.trim();
+          if (password && state.password && password === state.password) {
+            const result = state.constraintManager.deactivateConstraint(
+              state.pendingAppeal.constraint.id,
+              hashPassword(password)
+            );
+            if (result.success) {
+              log.info('约束已删除');
+              state.pendingAppeal = null;
+              return;
+            }
+          }
+        }
+
+        const isHighPriority = state.pendingAppeal.constraint.priority === 'critical' || 
+                               state.pendingAppeal.constraint.priority === 'high';
+        
+        if (isHighPriority) {
+          if (state.password && text.trim() === state.password) {
+            log.info('用户通过密码确认了申诉');
+            state.constraintManager.recordAppeal(state.pendingAppeal.constraint.id, {
+              reason: state.pendingAppeal.appeal.reason,
+              toolName: state.pendingAppeal.appeal.toolName,
+              params: state.pendingAppeal.appeal.toolParams,
+              userDecision: 'approved',
+            });
+            state.pendingAppeal = null;
+          }
+        } else {
+          if (lowerText === '允许' || lowerText === 'allow' || lowerText === 'yes' || lowerText === '确认') {
+            log.info('用户允许了申诉');
+            state.constraintManager.recordAppeal(state.pendingAppeal.constraint.id, {
+              reason: state.pendingAppeal.appeal.reason,
+              toolName: state.pendingAppeal.appeal.toolName,
+              params: state.pendingAppeal.appeal.toolParams,
+              userDecision: 'approved',
+            });
+            state.pendingAppeal = null;
+          }
+        }
+        return;
+      }
+
+      if (aiAnalyzer && text.trim() && !text.match(/^(确认|取消|confirm|cancel|yes|no|允许|拒绝|申诉)/i)) {
         const extraction = await extractConstraints(text, state.sessionHistory, aiAnalyzer);
         if (extraction.constraints.length > 0) {
           const added = state.constraintManager.addConstraintsFromExtraction(extraction, text);
@@ -273,40 +354,52 @@ export const openSafeFramePlugin = {
       
       log.debug?.(`评估工具调用: ${event.toolName}`);
 
-      const violationCheck = state.constraintManager.checkViolation({
+      const action = {
         type: event.toolName,
         description: `${event.toolName}(${JSON.stringify(event.params).slice(0, 100)})`,
         params: event.params,
-      });
+      };
 
-      if (violationCheck.violated) {
-        const violatedList = violationCheck.violatedConstraints
-          .map(c => `• ${c.content}`)
-          .join('\n');
-        
-        log.warn(`操作违反约束: ${event.toolName}`);
-        
-        return {
-          block: true,
-          blockReason: [
-            '═'.repeat(50),
-            '⚠️ Open Safe Frame - 约束冲突',
-            '═'.repeat(50),
-            '',
-            '【即将执行的操作】',
-            `  工具: ${event.toolName}`,
-            `  参数: ${JSON.stringify(event.params, null, 2).slice(0, 200)}`,
-            '',
-            '【违反的约束】',
-            violatedList,
-            '',
-            '【处理方式】',
-            '此操作与您之前设置的约束冲突。',
-            '如需执行，请先明确表示"允许执行此操作"，或修改约束。',
-            '',
-            '═'.repeat(50),
-          ].join('\n'),
-        };
+      const violation = state.constraintManager.checkViolation(action);
+
+      if (violation.violated) {
+        for (const c of violation.violatedConstraints) {
+          state.constraintManager.recordViolationAttempt(c.id);
+        }
+
+        if (violation.canAppeal) {
+          const appealMatch = state.userMessage.match(/申诉[：:]\s*(.+)/i);
+          if (appealMatch) {
+            const appealReason = appealMatch[1].trim();
+            const highestPriority = violation.violatedConstraints.reduce((highest, c) => {
+              const order = { critical: 0, high: 1, normal: 2 };
+              return order[c.priority] < order[highest.priority] ? c : highest;
+            });
+
+            const appeal: AppealRequest = {
+              constraintId: highestPriority.id,
+              reason: appealReason,
+              toolName: event.toolName,
+              toolParams: event.params,
+              intent: `执行 ${event.toolName} 操作`,
+              consequences: [`可能违反约束: ${highestPriority.content}`],
+              riskLevel: highestPriority.priority === 'critical' ? '严重' : 
+                         highestPriority.priority === 'high' ? '高' : '中',
+            };
+
+            state.pendingAppeal = {
+              appeal,
+              constraint: highestPriority,
+              toolEvent: event,
+            };
+
+            const message = state.constraintManager.formatAppealConfirmationMessage(appeal, highestPriority);
+            return { block: true, blockReason: message };
+          }
+        }
+
+        const message = state.constraintManager.formatViolationMessage(violation, action);
+        return { block: true, blockReason: message };
       }
 
       const toolContext: ToolContext = {
