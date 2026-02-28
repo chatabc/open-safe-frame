@@ -1,0 +1,29 @@
+{
+  "name": "@open-safe-frame/openclaw-plugin",
+  "version": "1.0.0",
+  "description": "OpenClaw安全插件 - 防止AI智能体失控造成数据损失",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "openclaw",
+    "ai-safety",
+    "agent-security",
+    "guardrails"
+  ],
+  "author": "Open Safe Frame",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

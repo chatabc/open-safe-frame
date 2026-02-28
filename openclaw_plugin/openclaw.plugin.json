@@ -1,0 +1,24 @@
+{
+  "id": "open-safe-frame",
+  "name": "Open Safe Frame",
+  "version": "1.0.0",
+  "description": "AI安全框架 - 防止数据删除、未授权操作等安全事故",
+  "author": "Open Safe Frame Team",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "hooks": [
+    "before_agent_start",
+    "before_tool_call",
+    "after_tool_call",
+    "tool_result_persist",
+    "session_end"
+  ],
+  "config": {
+    "enabled": true,
+    "blockOnRisk": true,
+    "requireConfirmation": true,
+    "maxDeleteCount": 10,
+    "protectedPaths": [],
+    "blockedCommands": []
+  }
+}
