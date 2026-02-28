@@ -1,26 +1,31 @@
 import type {
   OpenClawPluginApi,
-  BeforeToolCallEvent,
-  AfterToolCallEvent,
-  BeforeAgentStartEvent,
-  MessageReceivedEvent,
-  PluginContext,
-  HookResult,
-  Logger,
+  PluginLogger,
+  PluginHookBeforeAgentStartEvent,
+  PluginHookBeforeAgentStartResult,
+  PluginHookAgentContext,
+  PluginHookBeforeToolCallEvent,
+  PluginHookBeforeToolCallResult,
+  PluginHookToolContext,
+  PluginHookAfterToolCallEvent,
+  PluginHookMessageReceivedEvent,
+  PluginHookMessageContext,
+  PluginHookSessionEndEvent,
+  PluginHookSessionContext,
 } from './types';
-import { SafetyCoordinator, SafetyAssessment, SessionEvent, ToolContext } from './core';
+import { SafetyCoordinator, SafetyAssessment, SessionEvent, ToolContext, PluginConfig } from './core';
 
 const PLUGIN_ID = 'open-safe-frame';
 const PLUGIN_NAME = 'Open Safe Frame';
 const PLUGIN_VERSION = '2.0.0';
 const LOG_PREFIX = `[${PLUGIN_ID}]`;
 
-function createLogger(baseLogger: Logger): Logger {
+function createLogger(baseLogger: PluginLogger): PluginLogger {
   return {
     info: (msg: string) => baseLogger.info(`${LOG_PREFIX} ${msg}`),
     warn: (msg: string) => baseLogger.warn(`${LOG_PREFIX} ${msg}`),
     error: (msg: string) => baseLogger.error(`${LOG_PREFIX} ${msg}`),
-    debug: (msg: string) => baseLogger.debug?.(`${LOG_PREFIX} ${msg}`),
+    debug: baseLogger.debug ? (msg: string) => baseLogger.debug!(`${LOG_PREFIX} ${msg}`) : undefined,
   };
 }
 
@@ -31,7 +36,8 @@ interface SessionState {
 }
 
 const sessionStates = new Map<string, SessionState>();
-const coordinator = new SafetyCoordinator();
+let coordinator: SafetyCoordinator;
+let pluginConfig: PluginConfig;
 
 function getSessionState(sessionKey: string): SessionState {
   if (!sessionStates.has(sessionKey)) {
@@ -48,12 +54,14 @@ export const openSafeFramePlugin = {
   id: PLUGIN_ID,
   name: PLUGIN_NAME,
   description: 'AI安全框架 - 权限开放，约束内置',
+  version: PLUGIN_VERSION,
 
   register(api: OpenClawPluginApi) {
     const log = createLogger(api.logger);
-    const config = api.pluginConfig as Record<string, unknown> || {};
+    pluginConfig = (api.pluginConfig as PluginConfig) || {};
+    coordinator = new SafetyCoordinator(pluginConfig);
 
-    if (config.enabled === false) {
+    if (pluginConfig.enabled === false) {
       log.info('Plugin disabled via config');
       return;
     }
@@ -61,7 +69,10 @@ export const openSafeFramePlugin = {
     log.info(`Open Safe Frame v${PLUGIN_VERSION} loaded`);
     log.info('新范式: 意图理解 → 后果预测 → 价值判断 → 协同决策');
 
-    api.on('before_agent_start', async (event: BeforeAgentStartEvent, ctx: PluginContext) => {
+    api.on('before_agent_start', async (
+      event: PluginHookBeforeAgentStartEvent,
+      ctx: PluginHookAgentContext
+    ): Promise<PluginHookBeforeAgentStartResult | void> => {
       const sessionKey = ctx.sessionKey || 'default';
       const state = getSessionState(sessionKey);
       
@@ -96,38 +107,42 @@ export const openSafeFramePlugin = {
       };
     });
 
-    api.on('message_received', async (event: MessageReceivedEvent, ctx: PluginContext) => {
-      const sessionKey = ctx.sessionKey || 'default';
+    api.on('message_received', async (
+      event: PluginHookMessageReceivedEvent,
+      ctx: PluginHookMessageContext
+    ) => {
+      const sessionKey = ctx.conversationId || 'default';
       const state = getSessionState(sessionKey);
       
-      if (event.from === 'user') {
-        const text = typeof event.content === 'string'
-          ? event.content
-          : Array.isArray(event.content)
-            ? event.content.map(c => typeof c === 'object' && 'text' in c ? c.text : '').join(' ')
-            : String(event.content);
-        
-        state.userMessage = text;
-        state.sessionHistory.push({
-          type: 'user_message',
-          content: text,
-          timestamp: new Date(),
-        });
+      const text = typeof event.content === 'string'
+        ? event.content
+        : Array.isArray(event.content)
+          ? event.content.map(c => typeof c === 'object' && 'text' in c ? c.text : '').join(' ')
+          : String(event.content);
+      
+      state.userMessage = text;
+      state.sessionHistory.push({
+        type: 'user_message',
+        content: text,
+        timestamp: new Date(),
+      });
 
-        if (state.pendingConfirmation) {
-          const lowerText = text.toLowerCase().trim();
-          if (lowerText === '确认' || lowerText === 'confirm' || lowerText === 'yes') {
-            log.info('用户确认了操作');
-            state.pendingConfirmation = null;
-          } else if (lowerText === '取消' || lowerText === 'cancel' || lowerText === 'no') {
-            log.info('用户取消了操作');
-            state.pendingConfirmation = null;
-          }
+      if (state.pendingConfirmation) {
+        const lowerText = text.toLowerCase().trim();
+        if (lowerText === '确认' || lowerText === 'confirm' || lowerText === 'yes') {
+          log.info('用户确认了操作');
+          state.pendingConfirmation = null;
+        } else if (lowerText === '取消' || lowerText === 'cancel' || lowerText === 'no') {
+          log.info('用户取消了操作');
+          state.pendingConfirmation = null;
         }
       }
     });
 
-    api.on('before_tool_call', async (event: BeforeToolCallEvent, ctx: PluginContext) => {
+    api.on('before_tool_call', async (
+      event: PluginHookBeforeToolCallEvent,
+      ctx: PluginHookToolContext
+    ): Promise<PluginHookBeforeToolCallResult | void> => {
       const sessionKey = ctx.sessionKey || 'default';
       const state = getSessionState(sessionKey);
       
@@ -169,7 +184,10 @@ export const openSafeFramePlugin = {
       }
     }, { priority: 100 });
 
-    api.on('after_tool_call', async (event: AfterToolCallEvent, ctx: PluginContext) => {
+    api.on('after_tool_call', async (
+      event: PluginHookAfterToolCallEvent,
+      ctx: PluginHookToolContext
+    ) => {
       const sessionKey = ctx.sessionKey || 'default';
       const state = getSessionState(sessionKey);
       
@@ -193,8 +211,11 @@ export const openSafeFramePlugin = {
       log.debug?.(`工具调用完成: ${event.toolName} (${event.durationMs}ms)`);
     });
 
-    api.on('session_end', async (event, ctx: PluginContext) => {
-      const sessionKey = ctx.sessionKey || 'default';
+    api.on('session_end', async (
+      event: PluginHookSessionEndEvent,
+      ctx: PluginHookSessionContext
+    ) => {
+      const sessionKey = ctx.sessionId || 'default';
       sessionStates.delete(sessionKey);
       log.debug?.(`会话结束: ${sessionKey}`);
     });

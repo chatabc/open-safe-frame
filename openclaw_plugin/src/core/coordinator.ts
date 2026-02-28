@@ -2,23 +2,22 @@ import { IntentEngine } from './intent_engine';
 import { ConsequenceEngine } from './consequence_engine';
 import { ValueEngine } from './value_engine';
 import { DecisionEngine } from './decision_engine';
-import { Decision, UserIntent, ConsequencePrediction, ValueAlignmentResult, ToolContext, SessionEvent } from './types';
+import { 
+  Decision, UserIntent, Consequence, ValueJudgment, 
+  ToolContext, SessionEvent, PluginConfig, SafetyAssessment 
+} from './types';
 
-export interface SafetyAssessment {
-  intent: UserIntent;
-  consequencePrediction: ConsequencePrediction;
-  valueAlignment: ValueAlignmentResult;
-  decision: Decision;
-  processingTime: number;
-}
+export { SafetyAssessment } from './types';
 
 export class SafetyCoordinator {
   private intentEngine: IntentEngine;
   private consequenceEngine: ConsequenceEngine;
   private valueEngine: ValueEngine;
   private decisionEngine: DecisionEngine;
+  private config: PluginConfig;
 
-  constructor() {
+  constructor(config: PluginConfig = {}) {
+    this.config = config;
     this.intentEngine = new IntentEngine();
     this.consequenceEngine = new ConsequenceEngine();
     this.valueEngine = new ValueEngine();
@@ -45,7 +44,7 @@ export class SafetyCoordinator {
       toolContext
     );
 
-    const decision = this.decisionEngine.makeDecision({
+    const decisionResult = this.decisionEngine.makeDecision({
       intent,
       consequences: consequencePrediction.consequences,
       valueJudgment: valueAlignment.judgment,
@@ -57,9 +56,13 @@ export class SafetyCoordinator {
 
     return {
       intent,
-      consequencePrediction,
-      valueAlignment,
-      decision,
+      consequences: consequencePrediction.consequences,
+      valueAlignment: {
+        ...valueAlignment,
+        riskScore: valueAlignment.riskScore,
+        userInterestScore: valueAlignment.userInterestScore,
+      },
+      decision: decisionResult.decision,
       processingTime,
     };
   }

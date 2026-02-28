@@ -25,6 +25,8 @@ export interface ValueJudgment {
   score: number;
   concerns: string[];
   recommendations: string[];
+  riskScore: number;
+  userInterestScore: number;
 }
 
 export interface RiskLevel {
@@ -68,4 +70,23 @@ export interface UserProfile {
   protectedPaths?: string[];
   protectedDataTypes?: string[];
   previousConfirmations?: string[];
+}
+
+export interface SafetyAssessment {
+  intent: UserIntent;
+  consequences: Consequence[];
+  valueAlignment: ValueJudgment;
+  decision: Decision;
+  processingTime: number;
+}
+
+export interface PluginConfig {
+  enabled?: boolean;
+  riskThreshold?: 'low' | 'medium' | 'high';
+  protectedPaths?: string[];
+  enablePasswordConfirmation?: boolean;
+  notificationChannels?: {
+    feishu?: { webhook: string };
+    telegram?: { botToken: string; chatId: string };
+  };
 }

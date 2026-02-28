@@ -31,7 +31,11 @@ export class ValueEngine {
     const reasoning = this.generateReasoning(intent, consequences, valueScores);
 
     return {
-      judgment,
+      judgment: {
+        ...judgment,
+        riskScore,
+        userInterestScore,
+      },
       reasoning,
       userInterestScore,
       riskScore,
