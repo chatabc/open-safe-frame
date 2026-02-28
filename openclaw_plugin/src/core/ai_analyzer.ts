@@ -24,8 +24,9 @@ const INTENT_ANALYSIS_PROMPT = `你是一个AI安全分析专家。请分析以�
 请判断：
 1. 用户的真实意图是什么？
 2. AI是否正确理解了用户意图？
-3. 这个操作涉及哪些数据？
-4. 用户是否有明确的约束条件？
+3. 这个操作涉及哪些数据？规模多大？
+4. 用户是否有明确的约束条件或边界？
+5. 是否存在意图被误解的可能性？
 
 请以JSON格式返回分析结果：
 {
@@ -34,8 +35,9 @@ const INTENT_ANALYSIS_PROMPT = `你是一个AI安全分析专家。请分析以�
   "keyActions": ["关键操作1", "关键操作2"],
   "constraints": ["用户提到的约束条件"],
   "dataInvolved": [
-    {"type": "files|emails|financial|system|other", "description": "描述", "estimatedVolume": "small|medium|large|unknown"}
+    {"type": "files|emails|financial|system|credentials|other", "description": "描述", "estimatedVolume": "small|medium|large|unknown"}
   ],
+  "potentialMisunderstandings": ["可能的误解点"],
   "reasoning": "分析推理过程"
 }
 
@@ -54,25 +56,35 @@ const CONSEQUENCE_ANALYSIS_PROMPT = `你是一个AI安全分析专家。请分�
 {{DATA_INVOLVED}}
 
 ## 分析要求
-请评估这个操作可能产生的后果，特别关注：
-1. 数据丢失风险
-2. 财务风险
-3. 隐私风险
-4. 系统风险
-5. 操作是否可逆
+请评估这个操作可能产生的后果，特别关注以下风险模式：
+
+### 核心风险类型
+1. **数据丢失风险** - 操作是否会导致数据永久消失？是否可恢复？
+2. **作用域逃逸风险** - 操作是否会波及预期范围之外的数据？（如路径解析错误、通配符误用）
+3. **权限越界风险** - 操作是否超出了用户的授权范围？
+4. **财务风险** - 是否涉及资金、购买、支付？
+5. **隐私风险** - 是否涉及敏感信息、凭证、密钥？
+6. **系统风险** - 是否可能影响系统稳定性或安全性？
+
+### 关键评估维度
+- 可逆性：操作能否撤销？
+- 影响范围：影响多少数据/用户/系统？
+- 恢复成本：如果出问题，恢复需要多大代价？
 
 请以JSON格式返回分析结果：
 {
   "consequences": [
     {
-      "type": "data_loss|financial_loss|privacy_breach|system_damage|other",
+      "type": "data_loss|scope_escape|permission_violation|financial_loss|privacy_breach|system_damage|other",
       "description": "后果描述",
       "severity": "low|medium|high|critical",
       "reversibility": "reversible|partially_reversible|irreversible",
-      "affectedData": "受影响的数据"
+      "affectedData": "受影响的数据",
+      "likelihood": "low|medium|high"
     }
   ],
   "overallRisk": "low|medium|high|critical",
+  "riskFactors": ["风险因素1", "风险因素2"],
   "reasoning": "风险评估推理"
 }
 
@@ -86,29 +98,59 @@ const SAFETY_DECISION_PROMPT = `你是一个AI安全决策专家。请根据以�
 ## 操作分析
 {{CONSEQUENCE_ANALYSIS}}
 
-## 历史案例参考
-- Meta员工Summer Yue：AI误解"整理邮件"为"删除所有邮件"，导致邮件全部丢失
-- Google工程师：AI执行了危险的磁盘清理命令，导致数据丢失
-- OpenClaw用户：AI未经确认购买了100个牛油果
+## AI事故的核心教训
 
-## 决策原则
-1. 如非必要，不打扰用户
-2. 高风险操作必须确认
-3. 不可逆操作必须确认
-4. 意图不明确时需要确认
-5. 涉及财务必须确认
+历史表明，AI事故往往源于以下几类根本问题：
+
+### 1. 指令遗忘/忽略
+AI在长对话或复杂任务中"忘记"或无视用户的安全约束，擅自执行危险操作。
+教训：当用户设置了约束条件时，任何违反约束的操作都必须确认。
+
+### 2. 作用域逃逸
+操作的实际影响范围超出预期。常见于：
+- 路径解析问题（空格、特殊字符导致截断）
+- 通配符误用（删除了不该删除的文件）
+- 批量操作失控
+教训：涉及路径、批量操作时必须验证实际作用范围。
+
+### 3. 意图误解
+AI将用户的良性请求误解为危险操作，或反之。
+教训：当意图存在歧义时，必须确认。
+
+### 4. 权限越界
+AI执行了用户未明确授权的操作，特别是在用户已拒绝的情况下仍继续执行。
+教训：涉及授权边界时，必须明确确认。
+
+### 5. 不可逆操作
+执行了无法撤销的操作，导致永久性损失。
+教训：不可逆操作必须经过确认。
+
+## 决策原则（按优先级排序）
+1. **安全优先**：宁可多确认，不可误放行
+2. **如非必要，不打扰用户**：低风险操作直接放行
+3. **高风险必须确认**：数据丢失、财务、不可逆操作
+4. **歧义必须澄清**：意图不明确时需要确认
+5. **约束必须遵守**：用户设置的边界不可逾越
 
 ## 决策选项
-- proceed: 低风险，可以直接执行
-- confirm: 需要用户确认，提供清晰的确认信息
-- reject: 明显有害，应该阻止
+- **proceed**: 低风险，意图明确，可以直接执行
+- **confirm**: 存在风险或歧义，需要用户确认
+- **reject**: 明显有害或违反用户约束，应该阻止
+
+## 确认信息要求
+如果需要确认，confirmationMessage必须包含：
+1. AI理解的意图
+2. 即将执行的具体操作
+3. 可能的后果和风险
+4. 严重程度
+5. 是否可逆
 
 请以JSON格式返回决策：
 {
   "action": "proceed|confirm|reject",
   "reason": "决策原因",
   "riskLevel": "low|medium|high|critical",
-  "confirmationMessage": "如果需要确认，这里是给用户看的确认信息（包含：AI理解的意图、要执行的操作、可能的后果、严重程度）"
+  "confirmationMessage": "如果需要确认，这里是给用户看的确认信息（必须包含：意图、操作、后果、严重程度、可逆性）"
 }
 
 只返回JSON，不要其他内容。`;
@@ -338,7 +380,7 @@ export class AIAnalyzer {
         model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        max_tokens: 1000,
+        max_tokens: 1500,
       }),
     });
 
@@ -369,7 +411,7 @@ export class AIAnalyzer {
       headers,
       body: JSON.stringify({
         model,
-        max_tokens: 1000,
+        max_tokens: 1500,
         messages: [{ role: 'user', content: prompt }],
       }),
     });
