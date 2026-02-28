@@ -80,11 +80,19 @@ export interface SafetyAssessment {
   processingTime: number;
 }
 
+export interface AIProviderConfig {
+  provider: 'openai' | 'anthropic' | 'ollama' | 'openclaw';
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+}
+
 export interface PluginConfig {
   enabled?: boolean;
   riskThreshold?: 'low' | 'medium' | 'high';
   protectedPaths?: string[];
   enablePasswordConfirmation?: boolean;
+  aiProvider?: AIProviderConfig;
   notificationChannels?: {
     feishu?: { webhook: string };
     telegram?: { botToken: string; chatId: string };

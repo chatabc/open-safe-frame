@@ -17,7 +17,7 @@ import { SafetyCoordinator, SafetyAssessment, SessionEvent, ToolContext, PluginC
 
 const PLUGIN_ID = 'open-safe-frame';
 const PLUGIN_NAME = 'Open Safe Frame';
-const PLUGIN_VERSION = '2.0.0';
+const PLUGIN_VERSION = '2.1.0';
 const LOG_PREFIX = `[${PLUGIN_ID}]`;
 
 function createLogger(baseLogger: PluginLogger): PluginLogger {
@@ -38,6 +38,7 @@ interface SessionState {
 const sessionStates = new Map<string, SessionState>();
 let coordinator: SafetyCoordinator;
 let pluginConfig: PluginConfig;
+let log: PluginLogger;
 
 function getSessionState(sessionKey: string): SessionState {
   if (!sessionStates.has(sessionKey)) {
@@ -57,7 +58,7 @@ export const openSafeFramePlugin = {
   version: PLUGIN_VERSION,
 
   register(api: OpenClawPluginApi) {
-    const log = createLogger(api.logger);
+    log = createLogger(api.logger);
     pluginConfig = (api.pluginConfig as PluginConfig) || {};
     coordinator = new SafetyCoordinator(pluginConfig);
 
@@ -67,6 +68,13 @@ export const openSafeFramePlugin = {
     }
 
     log.info(`Open Safe Frame v${PLUGIN_VERSION} loaded`);
+    
+    if (pluginConfig.aiProvider) {
+      log.info(`AI分析模式: ${pluginConfig.aiProvider.provider}${pluginConfig.aiProvider.model ? ` / ${pluginConfig.aiProvider.model}` : ''}`);
+    } else {
+      log.info('规则分析模式 (未配置AI Provider)');
+    }
+    
     log.info('新范式: 意图理解 → 后果预测 → 价值判断 → 协同决策');
 
     api.on('before_agent_start', async (
@@ -159,6 +167,7 @@ export const openSafeFramePlugin = {
         
         log.info(`安全评估完成: ${assessment.decision.action} (${assessment.processingTime}ms)`);
         log.debug?.(`意图: ${assessment.intent.understood}`);
+        log.debug?.(`置信度: ${(assessment.intent.confidence * 100).toFixed(0)}%`);
         log.debug?.(`风险评分: ${assessment.valueAlignment.riskScore.toFixed(2)}`);
         log.debug?.(`用户利益评分: ${assessment.valueAlignment.userInterestScore.toFixed(2)}`);
 

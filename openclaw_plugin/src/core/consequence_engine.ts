@@ -1,4 +1,5 @@
-import { Consequence, UserIntent, ToolContext, SessionEvent } from './types';
+import type { Consequence, UserIntent, ToolContext, SessionEvent } from './types';
+import type { AIAnalyzer, AIAnalysisRequest, ConsequenceAnalysisResult } from './ai_analyzer';
 
 export interface ConsequencePrediction {
   consequences: Consequence[];
@@ -9,31 +10,94 @@ export interface ConsequencePrediction {
 }
 
 export class ConsequenceEngine {
-  
+  private aiAnalyzer: AIAnalyzer | null = null;
+
+  constructor(aiAnalyzer?: AIAnalyzer) {
+    this.aiAnalyzer = aiAnalyzer || null;
+  }
+
+  setAIAnalyzer(analyzer: AIAnalyzer): void {
+    this.aiAnalyzer = analyzer;
+  }
+
   async predict(
     intent: UserIntent,
     toolContext: ToolContext
   ): Promise<ConsequencePrediction> {
-    
-    const consequences = await this.analyzeConsequences(intent, toolContext);
+    if (this.aiAnalyzer) {
+      return this.predictWithAI(intent, toolContext);
+    }
+    return this.predictWithRules(intent, toolContext);
+  }
+
+  private async predictWithAI(
+    intent: UserIntent,
+    toolContext: ToolContext
+  ): Promise<ConsequencePrediction> {
+    try {
+      const request: AIAnalysisRequest = {
+        userMessage: intent.raw,
+        toolName: toolContext.toolName,
+        toolParams: toolContext.params,
+        sessionHistory: toolContext.sessionHistory.map(e => ({
+          type: e.type,
+          content: e.content,
+          toolName: e.toolName,
+        })),
+      };
+
+      const aiResult = await this.aiAnalyzer!.analyzeConsequence(request, {
+        understood: intent.understood,
+        confidence: intent.confidence,
+        keyActions: intent.keyActions,
+        constraints: intent.constraints,
+        dataInvolved: intent.dataInvolved,
+      });
+
+      const consequences: Consequence[] = aiResult.consequences.map(c => ({
+        type: c.type,
+        description: c.description,
+        severity: c.severity,
+        reversibility: c.reversibility,
+        affectedData: c.affectedData,
+      }));
+
+      return {
+        consequences,
+        overallSeverity: aiResult.overallRisk,
+        reversibility: this.assessReversibility(consequences),
+        confidence: 0.9,
+        reasoning: aiResult.reasoning,
+      };
+    } catch (error) {
+      console.error('[ConsequenceEngine] AI analysis failed, falling back to rules:', error);
+      return this.predictWithRules(intent, toolContext);
+    }
+  }
+
+  private predictWithRules(
+    intent: UserIntent,
+    toolContext: ToolContext
+  ): Promise<ConsequencePrediction> {
+    const consequences = this.analyzeConsequences(intent, toolContext);
     const overallSeverity = this.calculateOverallSeverity(consequences);
     const reversibility = this.assessReversibility(consequences);
     const confidence = this.calculatePredictionConfidence(intent, consequences);
     const reasoning = this.generateReasoning(intent, consequences);
 
-    return {
+    return Promise.resolve({
       consequences,
       overallSeverity,
       reversibility,
       confidence,
       reasoning,
-    };
+    });
   }
 
-  private async analyzeConsequences(
+  private analyzeConsequences(
     intent: UserIntent,
     toolContext: ToolContext
-  ): Promise<Consequence[]> {
+  ): Consequence[] {
     const consequences: Consequence[] = [];
     const { toolName, params } = toolContext;
 

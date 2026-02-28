@@ -1,19 +1,72 @@
-import { UserIntent, SessionEvent } from './types';
+import type { UserIntent, SessionEvent } from './types';
+import type { AIAnalyzer, AIAnalysisRequest, IntentAnalysisResult } from './ai_analyzer';
 
 export class IntentEngine {
-  
+  private aiAnalyzer: AIAnalyzer | null = null;
+
+  constructor(aiAnalyzer?: AIAnalyzer) {
+    this.aiAnalyzer = aiAnalyzer || null;
+  }
+
+  setAIAnalyzer(analyzer: AIAnalyzer): void {
+    this.aiAnalyzer = analyzer;
+  }
+
   async understand(
     userMessage: string,
     toolContext: { toolName: string; params: Record<string, unknown> },
     sessionHistory: SessionEvent[]
   ): Promise<UserIntent> {
-    
-    const raw = userMessage;
-    const understood = this.extractCoreIntent(userMessage, sessionHistory);
-    const confidence = this.calculateConfidence(userMessage, understood);
+    if (this.aiAnalyzer) {
+      return this.understandWithAI(userMessage, toolContext, sessionHistory);
+    }
+    return this.understandWithRules(userMessage, toolContext, sessionHistory);
+  }
+
+  private async understandWithAI(
+    userMessage: string,
+    toolContext: { toolName: string; params: Record<string, unknown> },
+    sessionHistory: SessionEvent[]
+  ): Promise<UserIntent> {
+    try {
+      const request: AIAnalysisRequest = {
+        userMessage,
+        toolName: toolContext.toolName,
+        toolParams: toolContext.params,
+        sessionHistory: sessionHistory.map(e => ({
+          type: e.type,
+          content: e.content,
+          toolName: e.toolName,
+        })),
+      };
+
+      const aiResult = await this.aiAnalyzer!.analyzeIntent(request);
+
+      return {
+        raw: userMessage,
+        understood: aiResult.understood,
+        confidence: aiResult.confidence,
+        keyActions: aiResult.keyActions,
+        constraints: aiResult.constraints,
+        dataInvolved: aiResult.dataInvolved,
+      };
+    } catch (error) {
+      console.error('[IntentEngine] AI analysis failed, falling back to rules:', error);
+      return this.understandWithRules(userMessage, toolContext, sessionHistory);
+    }
+  }
+
+  private understandWithRules(
+    message: string,
+    toolContext: { toolName: string; params: Record<string, unknown> },
+    history: SessionEvent[]
+  ): UserIntent {
+    const raw = message;
+    const understood = this.extractCoreIntent(message, history);
+    const confidence = this.calculateConfidence(message, understood);
     const keyActions = this.extractKeyActions(toolContext);
-    const constraints = this.extractConstraints(userMessage, sessionHistory);
-    const dataInvolved = this.analyzeDataInvolved(toolContext, userMessage);
+    const constraints = this.extractConstraints(message, history);
+    const dataInvolved = this.analyzeDataInvolved(toolContext, message);
 
     return {
       raw,

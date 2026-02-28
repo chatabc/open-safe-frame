@@ -2,9 +2,11 @@ import { IntentEngine } from './intent_engine';
 import { ConsequenceEngine } from './consequence_engine';
 import { ValueEngine } from './value_engine';
 import { DecisionEngine } from './decision_engine';
-import { 
+import { AIAnalyzer } from './ai_analyzer';
+import type { 
   Decision, UserIntent, Consequence, ValueJudgment, 
-  ToolContext, SessionEvent, PluginConfig, SafetyAssessment 
+  ToolContext, PluginConfig, SafetyAssessment,
+  AIProviderConfig 
 } from './types';
 
 export { SafetyAssessment } from './types';
@@ -14,14 +16,26 @@ export class SafetyCoordinator {
   private consequenceEngine: ConsequenceEngine;
   private valueEngine: ValueEngine;
   private decisionEngine: DecisionEngine;
+  private aiAnalyzer: AIAnalyzer | null = null;
   private config: PluginConfig;
 
   constructor(config: PluginConfig = {}) {
     this.config = config;
-    this.intentEngine = new IntentEngine();
-    this.consequenceEngine = new ConsequenceEngine();
+    
+    if (config.aiProvider) {
+      this.aiAnalyzer = new AIAnalyzer(config.aiProvider);
+    }
+    
+    this.intentEngine = new IntentEngine(this.aiAnalyzer || undefined);
+    this.consequenceEngine = new ConsequenceEngine(this.aiAnalyzer || undefined);
     this.valueEngine = new ValueEngine();
     this.decisionEngine = new DecisionEngine();
+  }
+
+  setAIProvider(config: AIProviderConfig): void {
+    this.aiAnalyzer = new AIAnalyzer(config);
+    this.intentEngine.setAIAnalyzer(this.aiAnalyzer);
+    this.consequenceEngine.setAIAnalyzer(this.aiAnalyzer);
   }
 
   async assess(
